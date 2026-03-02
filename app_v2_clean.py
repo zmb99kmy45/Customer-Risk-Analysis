@@ -4,8 +4,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-
-# Optional: SHAP
 import shap
 import streamlit as st
 from sklearn.calibration import calibration_curve
@@ -26,6 +24,7 @@ if uploaded is None:
     st.stop()
 
 df = pd.read_csv(uploaded)
+
 
 # -----------------------------
 # Basic checks + typing
@@ -50,11 +49,10 @@ missing = required_cols - set(df.columns)
 if missing:
     st.warning(f"Missing columns (some features may not work): {sorted(list(missing))}")
 
-# Ensure churned numeric
 if "churned" in df.columns:
     df["churned"] = pd.to_numeric(df["churned"], errors="coerce")
+df = df.dropna(subset=["churned"])
 
-# Features used for ML (numeric only baseline)
 features = [
     "age",
     "annual_income",
@@ -67,9 +65,6 @@ features = [
 ]
 available_features = [c for c in features if c in df.columns]
 
-if "churned" not in df.columns or df["churned"].isna().any():
-    # you said missing values are 0, but keep it robust
-    df = df.dropna(subset=["churned"])
 
 # -----------------------------
 # Sidebar controls
@@ -78,7 +73,7 @@ with st.sidebar:
     st.subheader("Model controls")
 
     threshold = st.slider("Decision threshold", 0.05, 0.95, 0.30, 0.05)
-    test_size = st.slider("Test size", 0.1, 0.4, 0.2, 0.05)
+    test_size = st.slider("Test size", 0.10, 0.40, 0.20, 0.05)
     random_state = st.number_input("Random seed", min_value=1, value=42)
 
     cost_intervention = st.slider("Cost per intervention (€)", 10, 200, 50)
@@ -91,11 +86,9 @@ with st.sidebar:
 # Train models once (session_state)
 # -----------------------------
 def train_all_models(df_: pd.DataFrame):
-    # keep only numeric features and target
     X = df_[available_features].copy()
     y = df_["churned"].astype(int).copy()
 
-    # fill numeric (should be none per your data, but robust)
     X = X.apply(pd.to_numeric, errors="coerce")
     X = X.fillna(X.median(numeric_only=True))
 
@@ -112,7 +105,9 @@ def train_all_models(df_: pd.DataFrame):
             class_weight="balanced", max_iter=1000
         ),
         "Random Forest": RandomForestClassifier(
-            n_estimators=200, class_weight="balanced", random_state=int(random_state)
+            n_estimators=200,
+            class_weight="balanced",
+            random_state=int(random_state),
         ),
         "Gradient Boosting": GradientBoostingClassifier(random_state=int(random_state)),
     }
@@ -134,7 +129,6 @@ if train_btn or ("models" not in st.session_state):
     st.session_state["models"] = models
     st.session_state["trained"] = True
 
-# Pull from session
 models = st.session_state.get("models", {})
 X = st.session_state.get("X")
 y = st.session_state.get("y")
@@ -146,6 +140,7 @@ y_test = st.session_state.get("y_test")
 if not st.session_state.get("trained", False):
     st.info("Click **Train / Refresh models** in the sidebar.")
     st.stop()
+
 
 # -----------------------------
 # Tabs
@@ -161,20 +156,18 @@ tabs = st.tabs(
     ]
 )
 
-# -----------------------------
+
+# =============================
 # TAB 1: EDA
-# -----------------------------
+# =============================
 with tabs[0]:
     st.header("EDA")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Rows", df.shape[0])
     c2.metric("Columns", df.shape[1])
-
-    churn_rate = (
-        float(df["churned"].mean()) if "churned" in df.columns else float("nan")
-    )
-    c3.metric("Churn rate", "N/A" if np.isnan(churn_rate) else f"{churn_rate*100:.2f}%")
+    churn_rate = float(df["churned"].mean())
+    c3.metric("Churn rate", f"{churn_rate*100:.2f}%")
 
     st.subheader("Data types")
     st.write(df.dtypes)
@@ -191,20 +184,37 @@ with tabs[0]:
     st.subheader("Numeric summary")
     st.write(df[available_features].describe())
 
-    st.subheader("Boxplot by churn")
-    feature = st.selectbox("Select feature", available_features, index=0)
-    tmp = df[[feature, "churned"]].copy()
-    tmp[feature] = pd.to_numeric(tmp[feature], errors="coerce")
-    tmp["churned"] = pd.to_numeric(tmp["churned"], errors="coerce")
-    tmp = tmp.dropna()
-    if len(tmp) < 10:
-        st.warning("Not enough rows for this boxplot.")
-    else:
-        fig = plt.figure(figsize=(8, 4), dpi=110)
-        tmp.boxplot(column=feature, by="churned")
-        plt.title(f"{feature} by churn")
-        plt.suptitle("")
-        st.pyplot(fig, clear_figure=True)
+    st.subheader("Boxplot by churn (compare 2 features)")
+    s1, s2 = st.columns(2)
+    with s1:
+        feature_a = st.selectbox(
+            "Feature A", available_features, index=0, key="eda_feat_a"
+        )
+    with s2:
+        default_idx = 1 if len(available_features) > 1 else 0
+        feature_b = st.selectbox(
+            "Feature B", available_features, index=default_idx, key="eda_feat_b"
+        )
+
+    def plot_box(feature, container):
+        tmp = df[[feature, "churned"]].copy()
+        tmp[feature] = pd.to_numeric(tmp[feature], errors="coerce")
+        tmp["churned"] = pd.to_numeric(tmp["churned"], errors="coerce")
+        tmp = tmp.dropna()
+
+        if tmp.empty:
+            container.warning(f"No valid data for {feature}")
+            return
+
+        fig, ax = plt.subplots(figsize=(6, 4), dpi=110)
+        sns.boxplot(data=tmp, x="churned", y=feature, ax=ax)
+        ax.set_title(f"{feature} by churn")
+        ax.set_xlabel("churned (0=active, 1=churned)")
+        container.pyplot(fig, clear_figure=True)
+
+    p1, p2 = st.columns(2)
+    plot_box(feature_a, p1)
+    plot_box(feature_b, p2)
 
     st.subheader("Correlation matrix")
     fig = plt.figure(figsize=(8, 6))
@@ -231,9 +241,10 @@ with tabs[0]:
             st.caption("Active (0)")
             st.write(df[df["churned"] == 0]["feedback_text"].head(5).tolist())
 
-# -----------------------------
+
+# =============================
 # TAB 2: Baseline Model
-# -----------------------------
+# =============================
 with tabs[1]:
     st.header("Baseline Model (Logistic Regression)")
 
@@ -245,19 +256,15 @@ with tabs[1]:
     st.metric("ROC-AUC", f"{auc:.3f}")
 
     st.subheader("Confusion Matrix")
-    cm = confusion_matrix(y_test, preds)
-    st.write(cm)
+    st.write(confusion_matrix(y_test, preds))
 
     st.subheader("Classification Report")
     st.text(classification_report(y_test, preds))
 
-    st.caption(
-        "Tip: adjust the threshold in the sidebar to trade precision vs recall for churn (class 1)."
-    )
 
-# -----------------------------
+# =============================
 # TAB 3: Model Comparison
-# -----------------------------
+# =============================
 with tabs[2]:
     st.header("Model Comparison")
 
@@ -267,6 +274,7 @@ with tabs[2]:
         preds = (probs >= float(threshold)).astype(int)
         auc = roc_auc_score(y_test, probs)
         rep = classification_report(y_test, preds, output_dict=True)
+
         rows.append(
             {
                 "Model": name,
@@ -279,12 +287,12 @@ with tabs[2]:
 
     results_df = pd.DataFrame(rows).sort_values(by="ROC-AUC", ascending=False)
     st.dataframe(results_df, use_container_width=True)
-
     st.caption("All models are evaluated with the SAME threshold set in the sidebar.")
 
-# -----------------------------
+
+# =============================
 # TAB 4: Explainability
-# -----------------------------
+# =============================
 with tabs[3]:
     st.header("Explainability")
 
@@ -306,17 +314,14 @@ with tabs[3]:
     st.pyplot(fig, clear_figure=True)
 
     st.subheader("SHAP (global) — Gradient Boosting")
-    st.caption("This explains which features drive predictions across the test set.")
     explainer = shap.Explainer(gb, X_train)
     shap_values = explainer(X_test)
-
     fig = plt.figure()
     shap.plots.bar(shap_values, show=False)
     st.pyplot(fig, clear_figure=True)
 
     st.subheader("Calibration curve (Gradient Boosting)")
     prob_true, prob_pred = calibration_curve(y_test, probs_gb, n_bins=10)
-
     fig = plt.figure()
     plt.plot(prob_pred, prob_true, marker="o")
     plt.plot([0, 1], [0, 1], linestyle="--")
@@ -327,7 +332,6 @@ with tabs[3]:
 
     st.subheader("Business impact simulation (using current threshold)")
     cm = confusion_matrix(y_test, preds_gb)
-    tp = int(cm[1, 1])
     fp = int(cm[0, 1])
     fn = int(cm[1, 0])
 
@@ -341,9 +345,10 @@ with tabs[3]:
         "Estimated savings (€)", f"{(cost_no_model - cost_model):,}".replace(",", " ")
     )
 
-# -----------------------------
-# TAB 5: AI Agent (Dust-style)
-# -----------------------------
+
+# =============================
+# TAB 5: AI Agent
+# =============================
 with tabs[4]:
     st.header("AI Agent (Dust-style)")
 
@@ -354,7 +359,9 @@ with tabs[4]:
         st.stop()
 
     customer_ids = df["customer_id"].astype(str).unique().tolist()
-    selected_id = st.selectbox("Select customer_id", sorted(customer_ids))
+    selected_id = st.selectbox(
+        "Select customer_id", sorted(customer_ids), key="agent_customer_id"
+    )
 
     row = df[df["customer_id"].astype(str) == str(selected_id)].iloc[0]
     row_X = pd.DataFrame([row[available_features].to_dict()])
@@ -461,63 +468,54 @@ with tabs[4]:
 
     st.subheader("Agent output: JSON (ready for an agent platform)")
 
-    def build_agent_json(customer_id, prob, drivers, row, threshold_value):
-        driver_objs = [
-            {"feature": f, "severity": sev, "explanation": why}
-            for (f, why, sev) in drivers
-        ]
+    driver_objs = [
+        {"feature": f, "severity": sev, "explanation": why} for (f, why, sev) in drivers
+    ]
+    risk_tier = (
+        "HIGH" if risk_prob >= 0.7 else ("MEDIUM" if risk_prob >= 0.4 else "LOW")
+    )
 
-        if prob >= 0.7:
-            tier = "HIGH"
-        elif prob >= 0.4:
-            tier = "MEDIUM"
-        else:
-            tier = "LOW"
-
-        payload = {
-            "agent_name": "wesype-risk-analyst",
-            "version": "1.0",
-            "input": {
-                "customer_id": str(customer_id),
-                "features": {
-                    k: (None if pd.isna(row.get(k)) else float(row.get(k)))
-                    for k in available_features
-                },
-                "feedback_text": (
-                    ""
-                    if pd.isna(row.get("feedback_text"))
-                    else str(row.get("feedback_text"))
-                ),
-                "last_purchase_date": (
-                    ""
-                    if pd.isna(row.get("last_purchase_date"))
-                    else str(row.get("last_purchase_date"))
-                ),
+    agent_payload = {
+        "agent_name": "wesype-risk-analyst",
+        "version": "1.0",
+        "input": {
+            "customer_id": str(selected_id),
+            "features": {
+                k: (None if pd.isna(row.get(k)) else float(row.get(k)))
+                for k in available_features
             },
-            "model": {
-                "type": "GradientBoostingClassifier",
-                "decision_threshold": float(threshold_value),
-                "risk_probability": float(prob),
-                "risk_tier": tier,
-            },
-            "explanations": {
-                "drivers": driver_objs,
-                "notes": "Drivers are derived from portfolio-median comparisons for fast, stable local explanations (can be replaced with SHAP local explanations).",
-            },
-            "actions": {
-                "playbook": playbook,
-                "message_draft": draft_message(prob, drivers),
-            },
-            "kpis_to_track": [
-                "weekly_active_usage",
-                "success_rate",
-                "time_saved_estimate",
-                "user_feedback_trend",
-            ],
-        }
-        return payload
-
-    agent_payload = build_agent_json(selected_id, risk_prob, drivers, row, threshold)
+            "feedback_text": (
+                ""
+                if pd.isna(row.get("feedback_text"))
+                else str(row.get("feedback_text"))
+            ),
+            "last_purchase_date": (
+                ""
+                if pd.isna(row.get("last_purchase_date"))
+                else str(row.get("last_purchase_date"))
+            ),
+        },
+        "model": {
+            "type": "GradientBoostingClassifier",
+            "decision_threshold": float(threshold),
+            "risk_probability": float(risk_prob),
+            "risk_tier": risk_tier,
+        },
+        "explanations": {
+            "drivers": driver_objs,
+            "notes": "Drivers are derived from portfolio-median comparisons for fast local explanations (can be replaced by SHAP local).",
+        },
+        "actions": {
+            "playbook": playbook,
+            "message_draft": draft_message(risk_prob, drivers),
+        },
+        "kpis_to_track": [
+            "weekly_active_usage",
+            "success_rate",
+            "time_saved_estimate",
+            "user_feedback_trend",
+        ],
+    }
 
     st.code(json.dumps(agent_payload, indent=2), language="json")
     st.download_button(
@@ -527,9 +525,10 @@ with tabs[4]:
         mime="application/json",
     )
 
-# -----------------------------
+
+# =============================
 # TAB 6: Executive Summary
-# -----------------------------
+# =============================
 with tabs[5]:
     st.header("Executive Summary")
 
@@ -537,7 +536,6 @@ with tabs[5]:
     st.write(f"- Dataset size: **{len(df)}** rows")
     st.write(f"- Churn rate: **{churn_rate*100:.2f}%** (imbalanced)")
 
-    # show best model by AUC
     aucs = []
     for name, m in models.items():
         p = m.predict_proba(X_test)[:, 1]
